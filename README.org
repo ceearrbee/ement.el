@@ -789,6 +789,14 @@ Ement.el is published in GNU ELPA and is considered part of GNU Emacs.  Therefor
 
 An Org-formatted version of the Matrix spec is available in the [[https://github.com/alphapapa/ement.el/tree/meta/spec][meta/spec]] branch.
 
+** Threaded replies design
+:PROPERTIES:
+:TOC:      :ignore (this)
+:END:
+
+See [[file:docs/threading-design.org][docs/threading-design.org]] for notes on adding thread support
+for replies using the Matrix \=`m.thread\=` relation.
+
 ** Rationale
 
 /This section is preserved for posterity.  As it says, Ement.el has long since surpassed ~matrix-client~, which should no longer be used./
