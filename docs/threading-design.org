@@ -1,0 +1,46 @@
+#+TITLE: Threading Design
+
+* Fetching thread context
+  Matrix supports retrieving a thread root and earlier events using the
+  =/context= endpoint as well as the =/relations= API.  When Ement is asked
+  to display a thread, it should request the root event along with any
+  earlier replies so that the complete conversation can be shown.
+
+  Example using =/context=:
+#+BEGIN_SRC http
+GET /_matrix/client/v3/rooms/!roomId:example.org/context/$eventId?limit=5
+Authorization: Bearer ACCESS_TOKEN
+#+END_SRC
+
+  The response includes the root event under the ~event~ key and earlier
+  events in ~events_before~:
+#+BEGIN_SRC json
+{
+  "event": { /* root event */ },
+  "events_before": [
+    { /* earlier reply */ }
+  ]
+}
+#+END_SRC
+
+  Example using =/relations= to fetch thread replies:
+#+BEGIN_SRC http
+GET /_matrix/client/v1/rooms/!roomId:example.org/relations/$eventId/m.thread
+Authorization: Bearer ACCESS_TOKEN
+#+END_SRC
+
+  The server returns a list of matching events:
+#+BEGIN_SRC json
+{
+  "chunk": [
+    { /* reply event */ }
+  ],
+  "original_event": { /* root event */ }
+}
+#+END_SRC
+
+* Thread summaries in room buffers
+  Room buffers should show a summary below each message that has
+  replies.  The summary displays the text of the last reply and a count
+  of total replies, giving a quick overview of activity in the thread.
+
