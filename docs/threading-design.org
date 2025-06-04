@@ -1,0 +1,29 @@
+#+TITLE: Threading Design
+
+* Compatibility notes
+
+Matrix servers do not all support message threading via MSC3952 yet. When
+Ement detects that a server lacks this feature, it falls back to sending
+rich reply events that resemble Element's quoting style.
+
+** Fallback rich reply example
+
+A reply using the fallback format might look like this:
+
+#+begin_src json
+{
+  "msgtype": "m.text",
+  "body": "> <@user:b.org> Original text\n\nMy reply.",
+  "format": "org.matrix.custom.html",
+  "formatted_body": "<mx-reply><blockquote><a href=\"https://matrix.to/#/$orig\">In reply to</a> <a href=\"https://matrix.to/#/@user:b.org\">@user:b.org</a><br>Original text</blockquote></mx-reply>My reply."
+}
+#+end_src
+
+This event omits an `m.relationship` entry so older servers simply show the
+quoted text.
+
+** Detecting unsupported servers
+
+During startup Ement checks the `/versions` endpoint for `org.matrix.msc3952` in
+`unstable_features`.  If missing, or if threaded sends return an error, Ement
+disables advanced threading and downgrades to the plain quoting form above.
