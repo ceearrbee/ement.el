@@ -1,0 +1,19 @@
+#+TITLE: Threading design
+
+* Viewing a thread
+
++ To view the thread containing the event at point, press ~t~ in a room buffer or
+  run the command ~ement-room-view-thread~.
+
+* Thread buffers
+
+Thread buffers mirror the behavior of room buffers.  In them you can:
+
++ Reply to events, including with ~S-<return>~ or ~RET~ as usual.
++ Edit your own messages or send reactions.
++ Jump to the original message with ~j~.
+
+* Returning to the room
+
++ Press ~q~ to close the thread buffer and return to its parent room.
++ You can also use ~M-g M-r~ (\=`ement-view-room') to switch back.
