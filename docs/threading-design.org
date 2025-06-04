@@ -1,0 +1,43 @@
+#+TITLE: Threaded Replies Design
+#+AUTHOR: Ement.el
+#+OPTIONS: toc:nil num:nil
+
+* Overview
+
+Matrix 1.11 introduced a thread mechanism using a relation type \=`m.thread\=`.
+Each event in a thread references the *thread root* using this relation and may
+also include \=`m.in_reply_to\=` for the event it directly replies to. This
+section outlines how to extend Ement.el to support sending and displaying
+threaded replies.
+
+* Sending threaded messages
+
+- Extend ~ement-send-message~ and ~ement-room-send-message~ with an optional
+  ~thread-root-event~ argument.
+- When non-nil, compose the event content so that it includes
+  \=`m.relates_to\=` with:
+  - \=`rel_type: "m.thread"\=`
+  - \=`event_id\=` pointing to the thread root.
+  - \=`m.in_reply_to\=` referencing the immediate parent.
+- The existing quoting produced by ~ement--add-reply~ remains as fallback for
+  clients without thread support.
+
+* Tracking threads
+
+- Add a ~thread-root~ slot to ~ement-event~ to remember the root ID locally.
+- When receiving events, examine their \=`m.relates_to\=` value and fill the
+  slot. Events lacking this relation are displayed normally.
+
+* Viewing threads
+
+- New command ~ement-room-view-thread~ opens a buffer limited to events whose
+  ~thread-root~ slot matches the root at point.
+- In thread buffers, replies behave the same as in rooms but automatically carry
+  the thread root.
+
+* Compatibility notes
+
+- Threading should gracefully degrade for homeservers without MSC3440 support;
+  such messages will appear as regular rich replies.
+- Existing APIs remain backward compatible as the new argument defaults to nil.
+
