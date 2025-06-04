@@ -1,0 +1,9 @@
+#+TITLE: Threading design
+
+* Overview
+This document describes how Ement.el handles Matrix message threads and the interactive commands used to view them.
+
+* User commands
+- ~t~ (`ement-room-view-thread`): view the thread for the event at point in a separate buffer.
+- A thread buffer behaves just like a normal room buffer.  Messages appear in order, you can send replies, and all standard key bindings continue to work.
+- To return to the original room, use ~q~ (`quit-window`) to close the thread buffer and jump back to the parent room buffer.
