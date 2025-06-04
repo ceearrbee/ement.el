@@ -1,0 +1,79 @@
+#+TITLE: Matrix Threading Design
+#+PROPERTY: LOGGING nil
+#+OPTIONS: num:2 toc:t
+
+This document sketches how Ement.el fetches and displays message threads.
+
+* Fetching thread root and history
+
+To show a thread from its root event, the client first fetches the event
+and its surrounding context.  This uses the Matrix `/context` API:
+
+#+BEGIN_SRC http
+GET /_matrix/client/v3/rooms/!roomid:example.org/context/$eventid?limit=10
+#+END_SRC
+
+The server responds with the root event in `event`, the events before and
+after in `events_before` and `events_after`, and the pagination tokens:
+
+#+BEGIN_SRC json
+{
+  "start": "s123_456",
+  "end": "t123_456",
+  "event": { "type": "m.room.message", "event_id": "$eventid", ... },
+  "events_before": [ ... ],
+  "events_after": [ ... ]
+}
+#+END_SRC
+
+To populate the rest of the thread, the client calls `/relations` on the
+root event with `rel_type=m.thread`:
+
+#+BEGIN_SRC http
+GET /_matrix/client/v1/rooms/!roomid:example.org/relations/$eventid/m.thread?limit=20
+#+END_SRC
+
+This returns the events that reply to the root, ordered chronologically:
+
+#+BEGIN_SRC json
+{
+  "chunk": [
+    { "type": "m.room.message", "event_id": "$reply1", ... },
+    { "type": "m.room.message", "event_id": "$reply2", ... }
+  ],
+  "next_batch": "t789_012"
+}
+#+END_SRC
+
+* Thread summary in room view
+
+In the main timeline the client shows a short summary below any message
+that has replies.  It fetches the most recent reply and the total count
+with a single `/relations` request limited to one event:
+
+#+BEGIN_SRC http
+GET /_matrix/client/v1/rooms/!roomid:example.org/relations/$eventid/m.thread?limit=1&direction=backward
+#+END_SRC
+
+The response includes the last reply in `chunk` and the number of related
+events in `total`:
+
+#+BEGIN_SRC json
+{
+  "chunk": [
+    { "type": "m.room.message", "event_id": "$last", ... }
+  ],
+  "total": 5
+}
+#+END_SRC
+
+From this the room view can display something like:
+
+#+begin_example
+(5 replies - last from @alice: "Sounds good!")
+#+end_example
+
+** File-local variables
+# Local Variables:
+# org-export-with-title: t
+# End:
