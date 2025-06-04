@@ -1,0 +1,23 @@
+#+TITLE: Threading design
+
+* Overview
+This document describes how Ement implements threaded conversations and how it falls back when servers lack thread support.
+
+* Compatibility notes
+The Matrix spec for threads is not yet universally supported.  When thread metadata cannot be used, Ement falls back to a rich reply event.  An example looks like this:
+
+#+BEGIN_SRC json
+{
+  "msgtype": "m.text",
+  "body": "> <@alice:example.com> Example\nReply text",
+  "format": "org.matrix.custom.html",
+  "formatted_body": "<mx-reply><blockquote><a href=\"https://matrix.to/#/!room/$$event\">In reply to</a> <a href=\"https://matrix.to/#/@alice:example.com\">@alice:example.com</a><br>Example</blockquote></mx-reply>Reply text"
+}
+#+END_SRC
+
+To decide whether threads are supported, Ement queries =/versions= on startup and checks for the capability =org.matrix.msc3771=.  If it is absent, replies will automatically be sent in the rich reply format above.
+
+For clients that do not understand rich replies, convert them to plain quotes:
+- Copy the referenced message text.
+- Prefix each line with ">" before sending.
+
