@@ -147,6 +147,10 @@ Ement.el is intended to be installed with Emacs's package system, which will ens
    - ~ement-room-toggle-space~ to toggle a room's membership in a space (a way to group rooms in Matrix).
    - ~ement-directory~ to view a room directory.
    - ~ement-directory-search~ to search a room directory.
+   - ~ement-space-browse~ to browse rooms in a space.
+   - ~ement-search~ to search across all rooms.
+   - ~ement-room-view-thread~ to view a thread (or press ~T~ in a room buffer).
+   - ~ement-room-switch~ to switch rooms with unread-first sorting.
 4. Use these special buffers to see events from multiple rooms (you can also reply to messages from these buffers!):
    - See all new events that mention you in the =*Ement Mentions*= buffer.
    - See all new events in rooms that have open buffers in the =*Ement Notifications*= buffer.
@@ -182,7 +186,8 @@ Note that if global minor mode ~ement-room-self-insert-mode~ is enabled (by defa
 *Switching*
 
 + List rooms: ~M-g M-l~
-+ Switch to other room: ~M-g M-r~
++ Switch to other room (unread first): ~M-g M-r~
++ Toggle room list sidebar: ~M-g M-s~
 + Switch to mentions buffer: ~M-g M-m~
 + Switch to notifications buffer: ~M-g M-n~
 + Quit window: ~q~
@@ -195,10 +200,13 @@ Note that if global minor mode ~ement-room-self-insert-mode~ is enabled (by defa
 + Edit message: ~<insert>~
 + Delete message: ~C-k~
 + Send reaction to event at point, or send same reaction at point: ~s r~
++ Send thread reply: ~s t~
 + Send emote: ~s e~
 + Send file: ~s f~
 + Send image: ~s i~
 + View event source: ~v~
++ View thread: ~T~ (on a threaded message, or click ~[N replies]~ / ~[thread]~)
++ Search across rooms: ~M-s s~
 + Complete members and rooms at point: ~C-M-i~ (standard ~completion-at-point~ command).  (Type an ~@~ prefix for a member mention, a ~#~ prefix for a room alias, or a ~!~ prefix for a room ID.)
 
 *Images*
@@ -242,6 +250,7 @@ Note that if global minor mode ~ement-room-self-insert-mode~ is enabled (by defa
 
 + Kill room's buffer: ~k~
 + Toggle room's membership in a space: ~s~
++ Filter by space: ~S~ (press again to clear filter)
 
 *** Directory buffers
 
@@ -286,11 +295,17 @@ Emacs may not display certain symbols and emojis well by default.  Based on [[ht
 
 ** Encrypted room support through Pantalaimon
 
-Ement.el doesn't support encrypted rooms natively, but it can be used transparently with the E2EE-aware reverse proxy daemon [[https://github.com/matrix-org/pantalaimon/][Pantalaimon]].  After configuring it according to its documentation, call ~ement-connect~ with the appropriate hostname and port, like:
+Ement.el doesn't support encrypted rooms natively, but it can be used transparently with the E2EE-aware reverse proxy daemon [[https://github.com/matrix-org/pantalaimon/][Pantalaimon]].  After configuring it according to its documentation, you can either customize ~ement-pantalaimon-uri~ or call ~ement-connect~ with the appropriate hostname and port:
 
 #+BEGIN_SRC elisp
+  ;; Option 1: Set the customization variable (persistent).
+  (setopt ement-pantalaimon-uri "http://localhost:8009")
+
+  ;; Option 2: Pass it when connecting (one-time).
   (ement-connect :uri-prefix "http://localhost:8009")
 #+END_SRC
+
+When ~ement-pantalaimon-uri~ is set, encrypted rooms show a lock icon (🔒) in the header line.  When it is not set, encrypted rooms display a warning banner with a clickable ~[Configure Pantalaimon]~ button.
 
 * Changelog
 :PROPERTIES:
@@ -299,7 +314,79 @@ Ement.el doesn't support encrypted rooms natively, but it can be used transparen
 
 ** 0.18-pre
 
-Nothing new yet.
+*Additions*
+
++ *Thread support*: View and participate in Matrix threads. ::
+  - Thread root messages show clickable ~[N replies]~ indicators.
+  - Thread reply messages show clickable ~[thread]~ indicators.
+  - Press ~T~ on any threaded message to open a dedicated thread view buffer.
+  - Press ~s t~ to compose a thread reply to the message at point.
+  - Thread indicators are shown via the ~%T~ format spec (included in the default format).
+  - Customize ~ement-room-show-thread-indicators~ to toggle indicators.
+  - Customize ~ement-room-hide-thread-replies~ to hide thread replies from the main timeline.
+
++ *Reply indicators*: Replies now show a clickable context line. ::
+  - Replies display as ~↩ sender: preview │ message body~, keeping the reply context and body visually connected.
+  - Click the reply indicator to jump to the original message.
+  - Shown via the ~%y~ format spec (included in the default format).
+
++ *Space hierarchy browser* (~ement-space.el~): Browse all rooms within a Matrix space. ::
+  - Command ~ement-space-browse~: select a space to browse its hierarchy.
+  - Shows joined status, room name, member count, topic, and aliases.
+  - Press ~RET~ to join/view a room, ~s~ to toggle space membership, ~+~ for more results.
+
++ *Space-filtered room list*: Filter the room list to show only rooms in a specific space. ::
+  - Press ~S~ in the room list buffer to filter by space (press again to clear).
+  - The header line shows the active space filter.
+
++ *Full-text search* (~ement-search.el~): Search across all rooms using the Matrix server-side search API. ::
+  - Command ~ement-search~ (bound to ~M-s s~ in room buffers): prompts for a search query.
+  - Results are shown in a dedicated buffer; press ~RET~ to jump to an event in its room.
+  - Press ~+~ to load more results.
+
++ *Quick room switching*: Switch rooms with unread-first sorting. ::
+  - Command ~ement-room-switch~ (bound to ~M-g M-r~): completion with unread rooms sorted first and annotated with unread/mention counts.
+
++ *Room list sidebar*: Auto-show room list on connect. ::
+  - Customize ~ement-room-list-side-window-on-connect~ to ~left~ or ~right~ to automatically show the room list sidebar after initial sync.
+  - Customize ~ement-room-list-side-window-width~ to set the sidebar width.
+  - Press ~M-g M-s~ in room buffers to toggle the sidebar.
+
++ *Tracking.el integration*: Mode-line unread indicators (like ERC). ::
+  - Enable ~ement-notify-tracking-mode~ to show unread rooms in the mode line.
+  - Requires the ~tracking~ library (included with Circe or available from ELPA).
+  - Mentions are highlighted with a distinct face (~ement-notify-tracking-mention~).
+
++ *Typing indicator in header line*: See who is typing directly in the room header. ::
+  - The room header line now shows ~[user1, user2 typing...]~ when other users are typing.
+
++ *Presence indicators*: Show user online/away/offline status. ::
+  - The ~%P~ format spec shows a colored dot (green/yellow/gray) for the sender's presence.
+  - Presence events from the Matrix sync response are now processed and stored on user structs.
+
++ *Inline input compose method*: A persistent input area below the room buffer. ::
+  - Set ~ement-room-compose-method~ to ~inline~ to use a small input buffer fixed below the room.
+  - ~RET~ sends, ~C-j~ inserts a newline, ~C-c C-k~ clears.
+
++ *Improved Pantalaimon integration*: ::
+  - Customize ~ement-pantalaimon-uri~ to set the proxy URI.
+  - Encrypted rooms show a lock icon (🔒) in the header line.
+  - When not using Pantalaimon, the encrypted room banner includes a clickable ~[Configure Pantalaimon]~ button.
+
++ New format specifiers for ~ement-room-message-format-spec~: ~%T~ (thread), ~%y~ (reply), ~%P~ (presence).
+
+*Changes*
+
++ Default ~ement-room-message-format-spec~ changed to ~"%S%L%y%B%T%r%R%t"~ to include reply and thread indicators.
++ Default Matrix client API version changed from ~r0~ to ~v3~ (via ~ement-api-default-version~).  Set to ~"r0"~ for legacy servers.
++ Default sync filter now includes a timeline limit of 20 events per room for faster syncs.
++ Unread badges in room list now show mention count with distinct highlighting.
+
+*Fixes*
+
++ Fix SSO login returning 404 on modern homeservers (was using deprecated ~r0~ API path).
++ Fix ~(void-function ement-tabulated-room-list-auto-update)~ error on every sync when ~ement-tabulated-room-list~ is not loaded.
++ Optimize thread root EWOC invalidation: skip during batch event processing to avoid O(n²) scans on buffer creation; use ~inhibit-redisplay~ for single-event invalidations.
 
 ** 0.17
 
