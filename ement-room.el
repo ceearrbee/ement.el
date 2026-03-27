@@ -924,7 +924,7 @@ non-nil, set the variables buffer-locally (i.e. when called from
         ;; is required to avoid compilation warnings).
         (message "Ement: Kill and reopen room buffers to display in new format")))))
 
-(defcustom ement-room-message-format-spec "%S%L%B%r%R%t"
+(defcustom ement-room-message-format-spec "%S%L%y%B%T%r%R%t"
   "Format messages according to this spec.
 It may contain these specifiers:
 
@@ -936,20 +936,24 @@ It may contain these specifiers:
   %B  Message body (formatted if available)
   %i  Event ID
   %O  Room display name (used for mentions buffer)
+  %P  Presence indicator (colored dot)
   %r  Reactions
   %s  Sender ID
   %S  Sender display name
   %t  Event timestamp, formatted according to
       `ement-room-timestamp-format'
+  %T  Thread indicator ([N replies] or [thread])
+  %y  Reply indicator (shows who the message replies to)
 
 Note that margin sizes must be set manually with
 `ement-room-left-margin-width' and
 `ement-room-right-margin-width'."
-  :type '(choice (const :tag "IRC-style using margins" "%S%L%B%r%R%t")
-                 (const :tag "IRC-style without margins" "[%t] %S> %B%r")
-                 (const :tag "IRC-style without margins, with wrap-prefix" "[%t] %S> %W%B%r")
-                 (const :tag "IRC-style with right margin, with wrap-prefix" "%S> %W%B%r%R%t")
-                 (const :tag "Elemental" "%B%r%R%t")
+  :type '(choice (const :tag "IRC-style using margins, with replies/threads" "%S%L%y%B%T%r%R%t")
+                 (const :tag "IRC-style using margins (classic)" "%S%L%B%r%R%t")
+                 (const :tag "IRC-style without margins" "[%t] %S> %y%B%T%r")
+                 (const :tag "IRC-style without margins, with wrap-prefix" "[%t] %S> %W%y%B%T%r")
+                 (const :tag "IRC-style with right margin, with wrap-prefix" "%S> %W%y%B%T%r%R%t")
+                 (const :tag "Elemental" "%y%B%T%r%R%t")
                  (string :tag "Custom format"))
   :set #'ement-room-message-format-spec-setter
   :set-after '(ement-room-left-margin-width ement-room-right-margin-width
@@ -1413,6 +1417,38 @@ spec) without requiring all events to use the same margin width."
   "Reactions."
   (ignore session)
   (ement-room--format-reactions event room))
+
+(ement-room-define-event-formatter ?y
+  "Reply indicator.  Shows who this message is replying to."
+  (pcase-let* (((cl-struct ement-event
+                           (content (map ('m.relates_to relates-to))))
+                event)
+               ((map ('m.in_reply_to (map ('event_id reply-event-id)))) relates-to)
+               ;; Also check for thread fallback replies -- skip those.
+               ((map ('rel_type rel-type)) relates-to))
+    (if (and reply-event-id
+             (not (equal "m.thread" rel-type)))
+        ;; This is a genuine reply (not a thread fallback).
+        (let* ((replied-event (when reply-event-id
+                                (gethash reply-event-id (ement-session-events session))))
+               (sender-name (if replied-event
+                                (ement--user-displayname-in
+                                 room (ement-event-sender replied-event))
+                              "unknown"))
+               (preview (when replied-event
+                          (truncate-string-to-width
+                           (replace-regexp-in-string
+                            "\n" " "
+                            (or (alist-get 'body (ement-event-content replied-event)) ""))
+                           50 nil nil t))))
+          (propertize (concat "↩ " sender-name
+                              (when preview (concat ": " preview))
+                              "\n")
+                      'face 'ement-room-quote
+                      'help-echo (when replied-event
+                                   (format "In reply to %s" sender-name))))
+      ;; Not a reply, or is a thread fallback.
+      "")))
 
 (ement-room-define-event-formatter ?P
   "Presence indicator for the event's sender."

@@ -150,6 +150,9 @@ emacs_load_args() {
   ;; Thread indicators enabled by default.
   (setq ement-room-show-thread-indicators t)
 
+  ;; Use format spec with reply and thread indicators.
+  (setq ement-room-message-format-spec "%S%L%y%B%T%r%R%t")
+
   (message "──────────────────────────────────────────────")
   (message "Ement.el test environment loaded!")
   (message "")

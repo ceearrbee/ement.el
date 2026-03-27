@@ -105,8 +105,12 @@ by users; ones who do so should know what they're doing.")
 
 (defvar ement-default-sync-filter
   '((room (state (lazy_load_members . t))
-          (timeline (lazy_load_members . t))))
-  "Default filter for sync requests.")
+          (timeline (lazy_load_members . t)
+                    (limit . 20))))
+  "Default filter for sync requests.
+The timeline limit controls how many events per room are returned
+in each sync response.  Lower values make syncs faster but may
+miss events in very active rooms.")
 
 (defvar ement-images-queue (make-plz-queue :limit 5)
   "`plz' HTTP request queue for image requests.")
