@@ -93,6 +93,7 @@ Used for caching section visibility."
     (define-key map [mouse-2] (ement-room-list-define-mouse-command ement-room-list-kill-buffer))
     (define-key map (kbd "k") #'ement-room-list-kill-buffer)
     (define-key map (kbd "s") #'ement-room-toggle-space)
+    (define-key map (kbd "S") #'ement-room-list-filter-by-space)
     map)
   "Keymap for `ement-room-list' buffers.
 See also `ement-room-list-button-map'.")
@@ -110,6 +111,10 @@ See also `ement-room-list-button-map'.")
 (defvar ement-room-list-timestamp-colors nil
   "List of colors used for timestamps.
 Set automatically when `ement-room-list-mode' is activated.")
+
+(defvar-local ement-room-list-current-space nil
+  "When non-nil, only show rooms in this space.
+Value is an `ement-room' struct for a space.")
 
 (defvar ement-room)
 (defvar ement-session)
@@ -147,6 +152,18 @@ Set automatically when `ement-room-list-mode' is activated.")
 (defcustom ement-room-list-space-prefix "Space: "
   "Prefix applied to space names."
   :type 'string)
+
+(defcustom ement-room-list-side-window-on-connect nil
+  "Show room list in a side window after initial sync.
+When non-nil, the value should be `left' or `right', indicating
+which side of the frame to use."
+  :type '(choice (const :tag "Don't show" nil)
+                 (const :tag "Left side" left)
+                 (const :tag "Right side" right)))
+
+(defcustom ement-room-list-side-window-width 35
+  "Width of the room list side window."
+  :type 'natnum)
 
 ;;;;; Faces
 
@@ -475,13 +492,15 @@ from recent to non-recent for rooms updated in the past hour."
             (and (equal 0 notification_count)
                  (equal 0 highlight_count)))
         ""
-      (concat (ement-propertize (number-to-string notification_count)
-                'face (if (zerop highlight_count)
-                          'default
-                        'ement-room-mention))
-              ":"
-              (ement-propertize (number-to-string highlight_count)
-                'face 'highlight)))))
+      (let ((badge (cond
+                    ((and highlight_count (> highlight_count 0))
+                     (ement-propertize (format " %d! " highlight_count)
+                       'face 'ement-room-list-very-recent))
+                    ((and notification_count (> notification_count 0))
+                     (ement-propertize (format " %d " notification_count)
+                       'face 'ement-room-list-unread))
+                    (t ""))))
+        badge))))
 
 (ement-room-list-define-column "Latest" ()
   (pcase-let ((`[,(cl-struct ement-room latest-ts) ,_session] item))
@@ -687,9 +706,15 @@ DISPLAY-BUFFER-ACTION is nil, the buffer is not displayed."
           (unless (eq 'ement-room-list-mode major-mode)
             (ement-room-list-mode))
           (let* ((room-session-vectors
-                  (cl-loop for (_id . session) in ement-sessions
-                           append (cl-loop for room in (ement-session-rooms session)
-                                           collect (vector room session))))
+                  (let ((all-rooms (cl-loop for (_id . session) in ement-sessions
+                                           append (cl-loop for room in (ement-session-rooms session)
+                                                           collect (vector room session)))))
+                    (if ement-room-list-current-space
+                        (cl-remove-if-not
+                         (lambda (vec)
+                           (ement--room-in-space-p (elt vec 0) ement-room-list-current-space))
+                         all-rooms)
+                      all-rooms)))
                  (taxy (cl-macrolet ((first-item
                                        (pred) `(lambda (taxy)
                                                  (when (taxy-items taxy)
@@ -730,8 +755,13 @@ DISPLAY-BUFFER-ACTION is nil, the buffer is not displayed."
                                   (magit-section-ident (magit-current-section)))))
             (setf format-table (car format-cons)
                   column-sizes (cdr format-cons)
-                  header-line-format (taxy-magit-section-format-header
-                                      column-sizes ement-room-list-column-formatters))
+                  header-line-format (concat
+                                      (taxy-magit-section-format-header
+                                       column-sizes ement-room-list-column-formatters)
+                                      (when ement-room-list-current-space
+                                        (format "  [Space: %s]"
+                                                (or (ement-room-display-name ement-room-list-current-space)
+                                                    (ement--room-display-name ement-room-list-current-space))))))
             (when-let ((window (get-buffer-window (current-buffer))))
               (setf window-point (window-point window)
                     window-start (window-start window)))
@@ -780,8 +810,16 @@ left."
      :display-buffer-action `(display-buffer-in-side-window
                               (dedicated . t)
                               (side . ,side)
+                              (window-width . ,ement-room-list-side-window-width)
                               (window-parameters
 			       (no-delete-other-windows . t))))))
+
+(defun ement-room-list-side-window-on-connect (_session)
+  "Show room list in a side window after initial sync.
+Uses `ement-room-list-side-window-on-connect' for the side.
+To be used in `ement-after-initial-sync-hook'."
+  (when ement-room-list-side-window-on-connect
+    (ement-room-list-side-window :side ement-room-list-side-window-on-connect)))
 
 (defun ement-room-list-revert (&optional _ignore-auto _noconfirm)
   "Revert current Ement-Room-List buffer."
@@ -836,6 +874,25 @@ left."
                               (> (line-number-at-pos) starting-line)))
     ;; No more unread rooms.
     (message "No more unread rooms")))
+
+(defun ement-room-list-filter-by-space ()
+  "Filter the room list to show only rooms in a space.
+With prefix argument, or when a filter is already active, clear
+the filter."
+  (interactive)
+  (if (or current-prefix-arg ement-room-list-current-space)
+      (progn
+        (setf ement-room-list-current-space nil)
+        (message "Space filter cleared.")
+        (revert-buffer))
+    (pcase-let* ((`(,space ,_session)
+                  (ement-complete-room :prompt "Filter by space: "
+                    :predicate #'ement--space-p)))
+      (setf ement-room-list-current-space space)
+      (message "Filtering by space: %s (press S to clear)"
+               (or (ement-room-display-name space)
+                   (ement--room-display-name space)))
+      (revert-buffer))))
 
 (define-derived-mode ement-room-list-mode magit-section-mode "Ement-Room-List"
   :global nil

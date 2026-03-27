@@ -1112,7 +1112,8 @@ suggested room."
     (alist-get selected-name name-to-room-session nil nil #'string=)))
 
 (cl-defun ement-send-message (room session
-                                   &key body formatted-body replying-to-event filter then)
+                                   &key body formatted-body replying-to-event
+                                   thread-root-event filter then)
   "Send message to ROOM on SESSION with BODY and FORMATTED-BODY.
 THEN may be a function to call after the event is sent
 successfully.  It is called with keyword arguments for ROOM,
@@ -1120,6 +1121,10 @@ SESSION, CONTENT, and DATA.
 
 REPLYING-TO-EVENT may be an event the message is
 in reply to; the message will reference it appropriately.
+
+THREAD-ROOT-EVENT may be an event that is the root of a thread;
+the message will be sent as a thread reply with the appropriate
+m.thread relation.
 
 FILTER may be a function through which to pass the message's
 content object before sending (see,
@@ -1141,9 +1146,13 @@ e.g. `ement-room-send-org-filter')."
                (then (or then #'ignore)))
     (when filter
       (setf content (funcall filter content room)))
-    (when replying-to-event
+    (cond
+     ;; Thread reply takes precedence over plain reply.
+     (thread-root-event
+      (setf content (ement--add-thread-relation content thread-root-event replying-to-event)))
+     (replying-to-event
       (setf replying-to-event (ement--original-event-for replying-to-event session)
-            content (ement--add-reply content replying-to-event room)))
+            content (ement--add-reply content replying-to-event room))))
     (ement-api session endpoint :method 'put :data (json-encode content)
       :then (apply-partially then :room room :session session
                              ;; Data is added when calling back.
@@ -1312,6 +1321,63 @@ one that has the expected ID and same sender."
       ("m.replace" (or (gethash replaced-event-id (ement-session-events session))
                        (make-ement-event :id replaced-event-id :sender sender)))
       (_ event))))
+
+;;;;; Thread utilities
+
+(defun ement--event-thread-root-id (event)
+  "Return the thread root event ID for EVENT, or nil."
+  (pcase-let (((cl-struct ement-event
+                          (content (map ('m.relates_to
+                                         (map ('rel_type rel-type)
+                                              ('event_id event-id))))))
+               event))
+    (when (equal "m.thread" rel-type)
+      event-id)))
+
+(defun ement--event-thread-root-p (event room)
+  "Return non-nil if EVENT is a thread root in ROOM.
+That is, if any thread replies reference EVENT as their root."
+  (when-let* ((threads (alist-get 'threads (ement-room-local room))))
+    (gethash (ement-event-id event) threads)))
+
+(defun ement--room-thread-events (room session root-event-id)
+  "Return known thread reply events for ROOT-EVENT-ID in ROOM on SESSION.
+Returns events sorted chronologically."
+  (when-let* ((threads (alist-get 'threads (ement-room-local room)))
+              (reply-ids (gethash root-event-id threads)))
+    (let ((events (cl-loop for id in reply-ids
+                           for event = (gethash id (ement-session-events session))
+                           when event collect event)))
+      (cl-sort events #'< :key #'ement-event-origin-server-ts))))
+
+(defun ement--event-thread-summary (event room)
+  "Return thread summary for EVENT in ROOM as a plist.
+Returns (:count N :latest-ts TS) if EVENT is a thread root,
+nil otherwise."
+  (when-let* ((threads (alist-get 'threads (ement-room-local room)))
+              (reply-ids (gethash (ement-event-id event) threads)))
+    (list :count (length reply-ids)
+          :latest-ts (alist-get 'thread-latest-ts
+                                (ement-event-local event)))))
+
+(defun ement--add-thread-relation (content thread-root-event &optional reply-to-event)
+  "Add thread relation metadata to message CONTENT alist.
+THREAD-ROOT-EVENT is the root event of the thread.
+REPLY-TO-EVENT, if non-nil, is the specific event being replied
+to within the thread; otherwise the root event is used as the
+fallback reply target."
+  (let* ((root-id (ement-event-id thread-root-event))
+         (reply-id (if reply-to-event
+                       (ement-event-id reply-to-event)
+                     root-id))
+         (is-falling-back (if reply-to-event :json-false t)))
+    (push (cons "m.relates_to"
+                (ement-alist "rel_type" "m.thread"
+                             "event_id" root-id
+                             "is_falling_back" is-falling-back
+                             "m.in_reply_to" (ement-alist "event_id" reply-id)))
+          content)
+    content))
 
 (defun ement--format-room (room &optional topic)
   "Return ROOM formatted with name, alias, ID, and optionally TOPIC.

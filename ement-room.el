@@ -179,9 +179,10 @@ keymap directly the issue may be visible.")
 
     ;; Switching
     (define-key map (kbd "M-g M-l") #'ement-room-list)
-    (define-key map (kbd "M-g M-r") #'ement-view-room)
+    (define-key map (kbd "M-g M-r") #'ement-room-switch)
     (define-key map (kbd "M-g M-m") #'ement-notify-switch-to-mentions-buffer)
     (define-key map (kbd "M-g M-n") #'ement-notify-switch-to-notifications-buffer)
+    (define-key map (kbd "M-g M-s") #'ement-room-list-side-window)
     (define-key map (kbd "q") #'quit-window)
 
     ;; Messages
@@ -191,10 +192,12 @@ keymap directly the issue may be visible.")
     (define-key map (kbd "<insert>") #'ement-room-dispatch-edit-message)
     (define-key map (kbd "C-k") #'ement-room-delete-message)
     (define-key map (kbd "s r") #'ement-room-send-reaction)
+    (define-key map (kbd "s t") #'ement-room-write-thread-reply)
     (define-key map (kbd "s e") #'ement-room-send-emote)
     (define-key map (kbd "s f") #'ement-room-send-file)
     (define-key map (kbd "s i") #'ement-room-send-image)
     (define-key map (kbd "v") #'ement-room-view-event)
+    (define-key map (kbd "T") #'ement-room-view-thread)
     (define-key map (kbd "D") #'ement-room-download-file)
 
     ;; Users
@@ -204,6 +207,7 @@ keymap directly the issue may be visible.")
 
     ;; Room
     (define-key map (kbd "M-s o") #'ement-room-occur)
+    (define-key map (kbd "M-s s") #'ement-search)
     (define-key map (kbd "r d") #'ement-describe-room)
     (define-key map (kbd "r m") #'ement-list-members)
     (define-key map (kbd "r t") #'ement-room-set-topic)
@@ -281,6 +285,9 @@ In that case, sender names are aligned to the margin edge.")
 (defvar ement-room-typing-timer nil
   "Timer used to send notifications while typing.")
 
+(defvar-local ement-room--typing-users nil
+  "List of display names of users currently typing in this room.")
+
 (defvar ement-room-matrix.to-url-regexp
   (rx "http" (optional "s") "://"
       "matrix.to" "/#/"
@@ -336,6 +343,19 @@ Called with two arguments, the room and the session."
 If more than this many users have sent a reaction, show the
 number of senders instead (and the names in a tooltip)."
   :type 'natnum)
+
+(defcustom ement-room-show-thread-indicators t
+  "Show thread indicators on messages in room buffers.
+When non-nil, thread root messages show a reply count indicator,
+and thread reply messages show a \"[thread]\" marker.  These use
+the `%T' format spec in `ement-room-message-format-spec'."
+  :type 'boolean)
+
+(defcustom ement-room-hide-thread-replies nil
+  "Hide thread replies from the main room timeline.
+When non-nil, messages that are part of a thread are not shown in
+the main timeline, only visible when viewing the thread."
+  :type 'boolean)
 
 (defcustom ement-room-hide-redacted-message-content t
   "Hide content in redacted messages.
@@ -423,6 +443,11 @@ Note that this does not need to inherit
 this one automatically."
   :group 'ement-room-faces)
 
+(defface ement-room-thread-indicator
+  '((t (:inherit font-lock-comment-face :weight bold)))
+  "Thread indicators on thread root messages."
+  :group 'ement-room-faces)
+
 (defface ement-room-timestamp-header
   '((t (:inherit header-line :weight bold :height 1.1)))
   "Timestamp headers."
@@ -486,6 +511,7 @@ rendered event may be limited."
                       (or (ement-room-avatar ement-room)
                           "")
                     "")
+                  (ement-room--header-line-encryption-indicator)
                   " " (propertize (ement-room--escape-%
                                    (or (ement-room-display-name ement-room)
                                        "[no room name]"))
@@ -494,7 +520,8 @@ rendered event may be limited."
                                     (or (ement-room-topic ement-room)
                                         "[no topic]"))
                                    ;; Also set help-echo in case the topic is too wide to fit.
-                                   'help-echo (ement-room-topic ement-room))))
+                                   'help-echo (ement-room-topic ement-room))
+                  (ement-room--header-line-typing-indicator)))
   "Header line format for room buffers.
 See Info node `(elisp)Header lines'."
   :type 'sexp)
@@ -555,7 +582,8 @@ The value `compose-buffer' means that the minibuffer is not used --
 messages are written in a compose buffer by default, and \\[save-buffer]
 sends the composed message directly."
   :type '(choice (const :tag "Minibuffer" minibuffer)
-                 (const :tag "Compose buffer" compose-buffer)))
+                 (const :tag "Compose buffer" compose-buffer)
+                 (const :tag "Inline input" inline)))
 
 (defcustom ement-room-compose-buffer-display-action
   (cons 'display-buffer-below-selected
@@ -1386,6 +1414,39 @@ spec) without requiring all events to use the same margin width."
   (ignore session)
   (ement-room--format-reactions event room))
 
+(ement-room-define-event-formatter ?P
+  "Presence indicator for the event's sender."
+  (ignore room session)
+  (let ((presence (ement-user-presence (ement-event-sender event))))
+    (pcase presence
+      ('online (propertize "●" 'face '(:foreground "green")
+                           'help-echo "Online"))
+      ('unavailable (propertize "●" 'face '(:foreground "orange")
+                                'help-echo "Away"))
+      ('offline (propertize "○" 'face '(:foreground "gray")
+                            'help-echo "Offline"))
+      (_ ""))))
+
+(ement-room-define-event-formatter ?T
+  "Thread indicator."
+  (ignore session)
+  (if ement-room-show-thread-indicators
+      (cond
+       ;; Thread root with replies.
+       ((ement--event-thread-root-p event room)
+        (let* ((summary (ement--event-thread-summary event room))
+               (count (plist-get summary :count)))
+          (propertize (format " [%d %s]" count (if (= count 1) "reply" "replies"))
+                      'face 'ement-room-thread-indicator
+                      'help-echo "Thread: press T to view")))
+       ;; Thread reply shown in main timeline.
+       ((alist-get 'thread-root (ement-event-local event))
+        (propertize " [thread]"
+                    'face 'ement-room-thread-indicator
+                    'help-echo "Part of a thread: press T to view"))
+       (t ""))
+    ""))
+
 (ement-room-define-event-formatter ?t
   "Timestamp."
   (ignore room session)
@@ -2086,6 +2147,7 @@ EVENT should be an `ement-event' or `ement-room-membership-events' struct."
   (call-interactively
    (cl-case ement-room-compose-method
      (compose-buffer 'ement-room-compose-message)
+     (inline 'ement-room-inline-focus)
      (t 'ement-room-send-message))))
 
 (defun ement-room-dispatch-new-message-alt ()
@@ -2094,6 +2156,7 @@ EVENT should be an `ement-event' or `ement-room-membership-events' struct."
   (call-interactively
    (cl-case ement-room-compose-method
      (compose-buffer 'ement-room-send-message)
+     (inline 'ement-room-compose-message)
      (t 'ement-room-compose-message))))
 
 (defun ement-room-dispatch-edit-message ()
@@ -2102,6 +2165,7 @@ EVENT should be an `ement-event' or `ement-room-membership-events' struct."
   (call-interactively
    (cl-case ement-room-compose-method
      (compose-buffer 'ement-room-compose-edit)
+     (inline 'ement-room-compose-edit)
      (t 'ement-room-edit-message))))
 
 (defun ement-room-dispatch-reply-to-message ()
@@ -2110,6 +2174,7 @@ EVENT should be an `ement-event' or `ement-room-membership-events' struct."
   (call-interactively
    (cl-case ement-room-compose-method
      (compose-buffer 'ement-room-compose-reply)
+     (inline 'ement-room-compose-reply)
      (t 'ement-room-write-reply))))
 
 (defun ement-room-dispatch-send-message ()
@@ -2118,6 +2183,7 @@ EVENT should be an `ement-event' or `ement-room-membership-events' struct."
   (call-interactively
    (cl-case ement-room-compose-method
      (compose-buffer #'ement-room-compose-send-direct)
+     (inline #'ement-room-compose-send-direct)
      (t #'ement-room-compose-send))))
 
 (cl-defun ement-room-send-message (room session &key body formatted-body replying-to-event)
@@ -2140,7 +2206,9 @@ the content (e.g. see `ement-room-send-org-filter')."
                                             nil 'inherit-input-method))))
        (list ement-room ement-session :body body))))
   (ement-send-message room session :body body :formatted-body formatted-body
-    :replying-to-event replying-to-event :filter ement-room-send-message-filter
+    :replying-to-event replying-to-event
+    :thread-root-event ement-room-thread-root-event
+    :filter ement-room-send-message-filter
     :then #'ement-room-send-event-callback)
   ;; NOTE: This assumes that the selected window is the buffer's window.  For now
   ;; this is almost surely the case, but in the future, we might let the function
@@ -2306,6 +2374,31 @@ Interactively, to event at point."
         ;; NOTE: `ement-room-send-message' looks up the original event, so we pass `event'
         ;; as :replying-to-event.
         (ement-room-send-message room session :body body :replying-to-event event)))))
+
+(defun ement-room-write-thread-reply (event)
+  "Write and send a thread reply to EVENT.
+If EVENT is already part of a thread, reply in that thread.
+Otherwise, start a new thread rooted at EVENT.
+Interactively, use the event at point."
+  (interactive (progn (cl-assert ement-ewoc)
+                      (list (ewoc-data (ewoc-locate ement-ewoc)))))
+  (cl-assert ement-room) (cl-assert ement-session) (cl-assert (ement-event-p event))
+  (let* ((root-id (or (ement--event-thread-root-id event)
+                      (alist-get 'thread-root (ement-event-local event))
+                      (ement-event-id event)))
+         (root-event (or (gethash root-id (ement-session-events ement-session))
+                         event)))
+    (ement-room-with-highlighted-event-at (point)
+      (pcase-let* ((room ement-room)
+                   (session ement-session)
+                   (prompt (format "Thread reply (%s): " (ement-room-display-name room)))
+                   (body (ement-room-with-typing
+                           (ement-room-read-string prompt nil 'ement-room-message-history
+                                                   nil 'inherit-input-method))))
+        (ement-send-message room session :body body
+          :thread-root-event root-event
+          :filter ement-room-send-message-filter
+          :then #'ement-room-send-event-callback)))))
 
 (when (assoc "emoji" input-method-alist)
   (defun ement-room-use-emoji-input-method ()
@@ -2478,6 +2571,53 @@ Uses action `ement-view-room-display-buffer-action', which see."
     (run-hook-with-args 'ement-room-view-hook room session)))
 (defalias 'ement-view-room #'ement-room-view)
 
+(defun ement-room-switch (room session)
+  "Switch to ROOM on SESSION, with unread rooms sorted first.
+Like `ement-room-view', but does not suggest the current room and
+sorts rooms with unread messages first in the completion list."
+  (interactive
+   (pcase-let* ((sessions (mapcar #'cdr ement-sessions))
+                (name-to-room-session
+                 (cl-loop for session in sessions
+                          append (cl-loop for room in (ement-session-rooms session)
+                                          unless (ement--space-p room)
+                                          collect (cons (ement--format-room room 'topic)
+                                                        (list room session)))))
+                (name-to-room-session
+                 (cl-sort name-to-room-session
+                          (lambda (a b)
+                            (let ((a-unread (ement-room-switch--unread-p (cadr a)))
+                                  (b-unread (ement-room-switch--unread-p (cadr b))))
+                              (and a-unread (not b-unread))))
+                          :key #'cdr))
+                (annotator (lambda (name)
+                             (when-let* ((entry (alist-get name name-to-room-session nil nil #'string=))
+                                         (room (car entry)))
+                               (pcase-let (((cl-struct ement-room unread-notifications) room))
+                                 (pcase-let (((map notification_count highlight_count) unread-notifications))
+                                   (cond
+                                    ((and highlight_count (> highlight_count 0))
+                                     (propertize (format " [%d mentions]" highlight_count) 'face 'error))
+                                    ((and notification_count (> notification_count 0))
+                                     (propertize (format " [%d unread]" notification_count) 'face 'warning))
+                                    (t nil)))))))
+                (names (mapcar #'car name-to-room-session))
+                (completion-table
+                 (lambda (string pred action)
+                   (if (eq action 'metadata)
+                       `(metadata (annotation-function . ,annotator))
+                     (complete-with-action action names string pred))))
+                (selected-name (completing-read "Switch to room: " completion-table nil t)))
+     (alist-get selected-name name-to-room-session nil nil #'string=)))
+  (ement-room-view room session))
+
+(defun ement-room-switch--unread-p (room)
+  "Return non-nil if ROOM has unread notifications."
+  (pcase-let* (((cl-struct ement-room unread-notifications) room)
+               ((map notification_count highlight_count) unread-notifications))
+    (not (and (equal 0 notification_count)
+              (equal 0 highlight_count)))))
+
 (defun ement-room-view-hook-room-list-auto-update (_room session)
   "Call `ement-room-list-auto-update' with SESSION.
 To be used in `ement-room-view-hook', which see."
@@ -2485,6 +2625,136 @@ To be used in `ement-room-view-hook', which see."
   ;; `ement-room-list-auto-update' doesn't need.
   (declare (function ement-room-list-auto-update "ement-room-list"))
   (ement-room-list-auto-update session))
+
+;;;;; Thread viewing
+
+(defvar-local ement-room-thread-root-event nil
+  "When non-nil, this buffer shows a thread rooted at this event.")
+
+(defun ement-room-view-thread (event)
+  "View the thread containing EVENT.
+If EVENT is a thread root, show its thread.  If EVENT is a thread
+reply, show the thread it belongs to.  Interactively, use the
+event at point."
+  (interactive (list (ewoc-data (ewoc-locate ement-ewoc))))
+  (unless (ement-event-p event)
+    (user-error "No event at point"))
+  (let* ((root-id (or (ement--event-thread-root-id event)
+                      (alist-get 'thread-root (ement-event-local event))
+                      (when (ement--event-thread-root-p event ement-room)
+                        (ement-event-id event))))
+         (root-event (when root-id
+                       (or (gethash root-id (ement-session-events ement-session))
+                           event))))
+    (unless root-id
+      (user-error "Event is not part of a thread"))
+    ;; Look for existing thread buffer.
+    (let* ((thread-buffers (alist-get 'thread-buffers (ement-room-local ement-room)))
+           (existing-buffer (alist-get root-id thread-buffers nil nil #'equal)))
+      (if (buffer-live-p existing-buffer)
+          (pop-to-buffer existing-buffer)
+        ;; Create new thread buffer.
+        (let ((room ement-room)
+              (session ement-session))
+          (ement-room--view-thread-buffer room session root-event))))))
+
+(defun ement-room--view-thread-buffer (room session root-event)
+  "Create and display a thread view buffer for ROOT-EVENT in ROOM on SESSION."
+  (let* ((root-id (ement-event-id root-event))
+         (display-name (or (ement-room-display-name room)
+                           (ement--room-display-name room)))
+         (preview (truncate-string-to-width
+                   (or (alist-get 'body (ement-event-content root-event)) "")
+                   40 nil nil t))
+         (buffer-name (format "*Ement Thread: %s / %s*" display-name preview))
+         (buffer (generate-new-buffer buffer-name)))
+    (with-current-buffer buffer
+      (ement-room-mode)
+      (setf ement-session session
+            ement-room room
+            ement-room-thread-root-event root-event
+            header-line-format
+            '(:eval (concat (propertize "Thread in " 'face 'font-lock-comment-face)
+                            (propertize (ement-room--escape-%
+                                         (or (ement-room-display-name ement-room)
+                                             "[no room name]"))
+                                        'face 'ement-room-name)
+                            (ement-room--header-line-typing-indicator))))
+      ;; Track thread buffer in room's local alist.
+      (let ((thread-buffers (alist-get 'thread-buffers (ement-room-local room))))
+        (setf (alist-get root-id thread-buffers nil nil #'equal) buffer
+              (alist-get 'thread-buffers (ement-room-local room)) thread-buffers))
+      (add-hook 'kill-buffer-hook
+                (lambda ()
+                  (let ((thread-buffers (alist-get 'thread-buffers (ement-room-local room))))
+                    (setf (alist-get root-id thread-buffers nil t #'equal) nil
+                          (alist-get 'thread-buffers (ement-room-local room)) thread-buffers)))
+                nil 'local)
+      ;; Insert the root event.
+      (ement-room--process-event
+       (make-ement-event :id (ement-event-id root-event)
+                         :sender (ement-event-sender root-event)
+                         :content (ement-event-content root-event)
+                         :origin-server-ts (ement-event-origin-server-ts root-event)
+                         :type (ement-event-type root-event)
+                         :state-key (ement-event-state root-event)
+                         :unsigned (ement-event-unsigned root-event)
+                         :local (ement-event-local root-event)))
+      ;; Insert known thread reply events.
+      (let ((reply-events (ement--room-thread-events room session root-id)))
+        (dolist (reply-event reply-events)
+          (ement-room--process-event reply-event)))
+      (ement-room--insert-ts-headers)
+      (when ement-room-sender-in-headers
+        (ement-room--insert-sender-headers ement-ewoc))
+      ;; Fetch more events from server.
+      (ement-room-thread--fetch-events room session root-id))
+    (pop-to-buffer buffer)
+    buffer))
+
+(defun ement-room-thread--fetch-events (room session root-event-id &optional from)
+  "Fetch thread events for ROOT-EVENT-ID in ROOM on SESSION.
+Optional FROM is a pagination token."
+  (let* ((room-id (ement-room-id room))
+         (endpoint (format "rooms/%s/relations/%s/m.thread"
+                           (url-hexify-string room-id)
+                           (url-hexify-string root-event-id)))
+         (params (when from
+                   (list (cons "from" from)))))
+    (ement-api session endpoint :params params :version "v1"
+      :then (lambda (data)
+              (ement-room-thread--fetch-events-callback
+               data room session root-event-id))
+      :else (lambda (_err)
+              (ement-debug "Thread fetch failed (server may not support relations API)"))))
+  nil)
+
+(defun ement-room-thread--fetch-events-callback (data room session root-event-id)
+  "Process thread events DATA for ROOT-EVENT-ID in ROOM on SESSION."
+  (pcase-let* (((map chunk ('next_batch next-batch)) data))
+    ;; Process fetched events.
+    (when chunk
+      (let* ((thread-buffers (alist-get 'thread-buffers (ement-room-local room)))
+             (buffer (alist-get root-event-id thread-buffers nil nil #'equal)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (let ((events (cl-loop for event-data across chunk
+                                   for event = (ement--make-event event-data)
+                                   ;; Don't re-insert events already in the buffer.
+                                   unless (ement-room--ewoc-last-matching ement-ewoc
+                                            (lambda (node-data)
+                                              (and (ement-event-p node-data)
+                                                   (equal (ement-event-id event)
+                                                          (ement-event-id node-data)))))
+                                   collect event)))
+              (dolist (event events)
+                ;; Store in session events table.
+                (puthash (ement-event-id event) event (ement-session-events session))
+                (ement-room--process-event event))
+              (when events
+                (ement-room--insert-ts-headers)
+                (when ement-room-sender-in-headers
+                  (ement-room--insert-sender-headers ement-ewoc))))))))))
 
 (defun ement-room--buffer-name (room)
   "Return name for ROOM's buffer."
@@ -2788,8 +3058,19 @@ data slot."
                                                         (ement-room-invite-state ement-room))
                                      thereis (cl-find "m.room.encryption" state
                                                       :test #'equal :key #'ement-event-type))
-                            (propertize "This appears to be an encrypted room, which is not natively supported by Ement.el.  (See information about using Pantalaimon in Ement.el documentation.)"
-                                        'face 'font-lock-warning-face)
+                            (if ement-pantalaimon-uri
+                                (propertize "🔒 Encrypted room (via Pantalaimon)"
+                                            'face 'font-lock-string-face)
+                              (concat
+                               (propertize "This appears to be an encrypted room, which is not natively supported by Ement.el.  "
+                                           'face 'font-lock-warning-face)
+                               (ement--button-buttonize
+                                (propertize "[Configure Pantalaimon]"
+                                            'face '(:inherit font-lock-keyword-face :underline t))
+                                (lambda (_)
+                                  (customize-variable 'ement-pantalaimon-uri)))
+                               (propertize "  (See Ement.el documentation for setup instructions.)"
+                                           'face 'font-lock-warning-face)))
                           ""))
                 (footer (pcase (ement-room-status ement-room)
                           ;; Set header and footer for an invited room.
@@ -2863,6 +3144,26 @@ data slot."
                      (equal id (ement-event-id data)))
            return data
            do (setf node (ewoc-prev ement-ewoc node))))
+
+(defun ement-room--header-line-typing-indicator ()
+  "Return a typing indicator string for the header line."
+  (if ement-room--typing-users
+      (propertize (ement-room--escape-%
+                   (concat "  [" (string-join ement-room--typing-users ", ") " typing...]"))
+                  'face 'font-lock-comment-face)
+    ""))
+
+(defun ement-room--header-line-encryption-indicator ()
+  "Return an encryption indicator string for the header line.
+Shows a lock icon for encrypted rooms."
+  (if (cl-loop for state in (list (ement-room-state ement-room)
+                                  (ement-room-invite-state ement-room))
+               thereis (cl-find "m.room.encryption" state
+                                :test #'equal :key #'ement-event-type))
+      (propertize " 🔒" 'help-echo (if ement-pantalaimon-uri
+                                       "Encrypted (via Pantalaimon)"
+                                     "Encrypted (no E2EE support)"))
+    ""))
 
 (defun ement-room--escape-% (string)
   "Return STRING with \"%\" escaped.
@@ -3210,16 +3511,19 @@ function to `ement-room-event-fns', which see."
                (usernames) (footer))
     (setf user-ids (delete local-user-id user-ids))
     (if (zerop (length user-ids))
-        (setf footer "")
+        (setf footer ""
+              ement-room--typing-users nil)
       (setf usernames (cl-loop for id across user-ids
                                for user = (gethash id ement-users)
                                if user
                                collect (ement--user-displayname-in ement-room user)
                                else collect id)
+            ement-room--typing-users usernames
             footer (propertize (concat "Typing: " (string-join usernames ", "))
                                'face 'font-lock-comment-face)))
     (with-silent-modifications
-      (ewoc-set-hf ement-ewoc "" footer))))
+      (ewoc-set-hf ement-ewoc "" footer))
+    (force-mode-line-update)))
 
 (ement-room-defevent "m.room.avatar"
   (ement-room--insert-event event))
@@ -3247,8 +3551,20 @@ function to `ement-room-event-fns', which see."
       ;; New event.
       (if replaced-by-id
           (ement-debug "Event replaced: not inserting." replaced-by-id)
-        ;; Not replaced: insert it.
-        (ement-room--insert-event event)))))
+        ;; Check for thread relation.
+        (let ((thread-root-id (and (equal "m.thread" rel-type) replaces-event-id)))
+          ;; Note: for m.thread events, the `event_id' in `m.relates_to' is the thread root.
+          ;; We re-extract it here since the destructuring above already captured it.
+          (setq thread-root-id (ement--event-thread-root-id event))
+          (if (and ement-room-hide-thread-replies thread-root-id)
+              ;; Thread reply and hiding is enabled: don't insert, but invalidate root.
+              (ement-room--invalidate-thread-root thread-root-id)
+            ;; Insert the event normally.
+            (ement-room--insert-event event)
+            ;; If this is a thread reply, also invalidate the root's EWOC node
+            ;; so its thread indicator updates.
+            (when thread-root-id
+              (ement-room--invalidate-thread-root thread-root-id))))))))
 
 (ement-room-defevent "m.room.tombstone"
   (pcase-let* (((cl-struct ement-event content) event)
@@ -3577,6 +3893,16 @@ PRED is called with node's data.  Moves to next node by MOVE-FN."
            until (or (null node)
                      (funcall pred (ewoc-data node)))
            finally return node))
+
+(defun ement-room--invalidate-thread-root (thread-root-id)
+  "Invalidate EWOC node for thread root THREAD-ROOT-ID.
+This causes the thread root's display to be refreshed, updating
+its thread indicator."
+  (when-let ((node (ement-room--ewoc-last-matching ement-ewoc
+                     (lambda (data)
+                       (and (ement-event-p data)
+                            (equal thread-root-id (ement-event-id data)))))))
+    (ewoc-invalidate ement-ewoc node)))
 
 (defun ement-room--ewoc-last-matching (ewoc predicate)
   "Return the last node in EWOC matching PREDICATE.
@@ -4545,6 +4871,101 @@ With prefix arg NO-HISTORY, do not add to `ement-room-message-history'."
   "Kill the compose buffer and window without adding to the history."
   (interactive)
   (ement-room-compose-abort t))
+
+;;;;; Inline input
+
+(defvar-local ement-room-inline-input-buffer nil
+  "Buffer used for inline input in this room buffer.")
+
+(defvar ement-room-inline-input-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'ement-room-inline-send)
+    (define-key map (kbd "C-j") #'newline)
+    (define-key map (kbd "C-c C-k") #'ement-room-inline-clear)
+    (define-key map (kbd "M-p") #'ement-room-compose-history-prev-message)
+    (define-key map (kbd "M-n") #'ement-room-compose-history-next-message)
+    map)
+  "Keymap for inline input buffers.")
+
+(define-minor-mode ement-room-inline-input-mode
+  "Minor mode for inline input in Ement room buffers."
+  :lighter " Input"
+  :keymap ement-room-inline-input-mode-map)
+
+(defun ement-room-inline-setup (room session)
+  "Set up inline input for ROOM on SESSION in the current buffer.
+Creates a persistent input buffer displayed below the room."
+  (unless (and ement-room-inline-input-buffer
+               (buffer-live-p ement-room-inline-input-buffer))
+    (let* ((room-buffer (current-buffer))
+           (input-buffer (generate-new-buffer
+                          (format " *Ement input: %s*"
+                                  (or (ement-room-display-name room)
+                                      (ement-room-id room))))))
+      (with-current-buffer input-buffer
+        (ement-room-inline-input-mode 1)
+        (setq-local ement-room room
+                    ement-session session
+                    ement-room-thread-root-event
+                    (buffer-local-value 'ement-room-thread-root-event room-buffer))
+        (setq-local completion-at-point-functions
+                    '(ement-room--complete-members-at-point
+                      ement-room--complete-rooms-at-point))
+        (setq-local ement-room-send-message-filter
+                    (buffer-local-value 'ement-room-send-message-filter room-buffer))
+        (setq header-line-format
+              (substitute-command-keys
+               "\\[ement-room-inline-send]: send, \\[newline]: newline, \\[ement-room-inline-clear]: clear")))
+      (setq-local ement-room-inline-input-buffer input-buffer)
+      ;; Clean up input buffer when room buffer is killed.
+      (add-hook 'kill-buffer-hook
+                (lambda ()
+                  (when (buffer-live-p input-buffer)
+                    (kill-buffer input-buffer)))
+                nil 'local)
+      ;; Display the input buffer below.
+      (display-buffer input-buffer
+                      `(display-buffer-in-atom-window
+                        (window . ,(get-buffer-window room-buffer))
+                        (window-height . 4)
+                        (side . below))))))
+
+(defun ement-room-inline-focus ()
+  "Focus the inline input buffer, creating it if necessary."
+  (interactive)
+  (when (eq ement-room-compose-method 'inline)
+    (ement-room-inline-setup ement-room ement-session)
+    (when (and ement-room-inline-input-buffer
+               (buffer-live-p ement-room-inline-input-buffer))
+      (let ((window (get-buffer-window ement-room-inline-input-buffer)))
+        (if window
+            (select-window window)
+          ;; Re-display it.
+          (display-buffer ement-room-inline-input-buffer
+                          `(display-buffer-in-atom-window
+                            (window . ,(selected-window))
+                            (window-height . 4)
+                            (side . below)))
+          (when-let ((win (get-buffer-window ement-room-inline-input-buffer)))
+            (select-window win)))))))
+
+(defun ement-room-inline-send ()
+  "Send the contents of the inline input buffer."
+  (interactive)
+  (let ((body (string-trim (buffer-substring-no-properties (point-min) (point-max)))))
+    (when (string-empty-p body)
+      (user-error "Message is empty"))
+    (add-to-history 'ement-room-message-history body)
+    (ement-send-message ement-room ement-session :body body
+      :thread-root-event ement-room-thread-root-event
+      :filter ement-room-send-message-filter
+      :then #'ement-room-send-event-callback)
+    (erase-buffer)))
+
+(defun ement-room-inline-clear ()
+  "Clear the inline input buffer."
+  (interactive)
+  (erase-buffer))
 
 (defun ement-room-init-compose-buffer (room session)
   "Set up the current buffer as a compose buffer.

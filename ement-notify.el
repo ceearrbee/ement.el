@@ -193,7 +193,8 @@ Does not do anything if session hasn't finished initial sync."
       (when (run-hook-with-args-until-success 'ement-notify-mention-predicates event room session)
         (ement-notify--log-to-buffer event room session :buffer-name "*Ement Mentions*"))
       (when (run-hook-with-args-until-success 'ement-notify-mark-frame-urgent-predicates event room session)
-        (ement-notify--mark-frame-urgent event room session)))))
+        (ement-notify--mark-frame-urgent event room session))
+      (ement-notify--tracking-add event room session))))
 
 (defun ement-notify--mark-frame-urgent (_event room _session)
   "Mark frame showing ROOM's buffer as urgent.
@@ -314,6 +315,68 @@ According to the room's notification configuration on the server."
          (ement-user-id (ement-event-sender event))))
 
 (defalias 'ement-notify--event-mentions-room-p #'ement--event-mentions-room-p)
+
+;;;;; Faces
+
+(defface ement-notify-tracking
+  '((t :inherit bold))
+  "Face for rooms with unread messages in the mode line.
+Used by `tracking' integration when `ement-notify-tracking-mode'
+is non-nil."
+  :group 'ement-notify)
+
+(defface ement-notify-tracking-mention
+  '((t :inherit (error bold)))
+  "Face for rooms with mentions in the mode line.
+Used by `tracking' integration when `ement-notify-tracking-mode'
+is non-nil."
+  :group 'ement-notify)
+
+;;;; Tracking
+
+(declare-function tracking-add-buffer "tracking" (buffer &optional faces))
+(declare-function tracking-remove-buffer "tracking" (buffer))
+
+(defun ement-notify--tracking-add (event room session)
+  "Add ROOM's buffer to `tracking' when not visible.
+Uses `ement-notify-tracking-mention' face for mentions, and
+`ement-notify-tracking' face otherwise.  Only active when
+`ement-notify-tracking-mode' is non-nil and `tracking' is loaded."
+  (when (and ement-notify-tracking-mode
+             (featurep 'tracking))
+    (when-let* ((buffer (alist-get 'buffer (ement-room-local room))))
+      (when (and (buffer-live-p buffer)
+                 (not (get-buffer-window buffer 'visible)))
+        (let ((faces (if (run-hook-with-args-until-success
+                          'ement-notify-mention-predicates event room session)
+                         '(ement-notify-tracking-mention)
+                       '(ement-notify-tracking))))
+          (tracking-add-buffer buffer faces))))))
+
+(defun ement-notify--tracking-remove (_room _session)
+  "Remove current room's buffer from `tracking'.
+To be used in `ement-room-view-hook'."
+  (when (and ement-notify-tracking-mode
+             (featurep 'tracking))
+    (when-let* ((buffer (current-buffer)))
+      (when (buffer-live-p buffer)
+        (tracking-remove-buffer buffer)))))
+
+;;;###autoload
+(define-minor-mode ement-notify-tracking-mode
+  "Global minor mode to track unread Ement rooms in the mode line.
+Requires the `tracking' library (included with Circe or available
+as a standalone ELPA package)."
+  :global t
+  :group 'ement-notify
+  (if ement-notify-tracking-mode
+      (if (require 'tracking nil t)
+          (progn
+            (add-hook 'ement-notify-log-predicates #'ement-notify--room-buffer-live-p)
+            (add-hook 'ement-room-view-hook #'ement-notify--tracking-remove))
+        (setq ement-notify-tracking-mode nil)
+        (user-error "The `tracking' library is not available; install it from ELPA"))
+    (remove-hook 'ement-room-view-hook #'ement-notify--tracking-remove)))
 
 ;;;; Bookmark support
 

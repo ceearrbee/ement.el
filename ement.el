@@ -90,7 +90,7 @@ Hooks are called with one argument, the session that was
 synced.")
 
 (defvar ement-event-hook
-  '(ement-notify ement--process-event ement--put-event)
+  '(ement-notify ement--process-event ement--put-event ement--process-thread-relation)
   "Hook called for events.
 Each function is called with three arguments: the event, the
 room, and the session.  This hook isn't intended to be modified
@@ -138,6 +138,17 @@ Writes the session file when Emacs is killed."
   ;; FIXME: Expand correct XDG cache directory (new in Emacs 27).
   "Save username and access token to this file."
   :type 'file)
+
+(defcustom ement-pantalaimon-uri nil
+  "URI prefix for a Pantalaimon E2EE proxy.
+When set, this URI is used for Matrix API requests instead of the
+homeserver's URI, enabling transparent end-to-end encryption.
+For example: \"http://localhost:8009\".
+
+See URL `https://github.com/matrix-org/pantalaimon' for more
+information."
+  :type '(choice (string :tag "URI prefix (e.g. http://localhost:8009)")
+                 (const :tag "Don't use Pantalaimon" nil)))
 
 (defcustom ement-auto-sync t
   "Automatically sync again after syncing."
@@ -579,7 +590,9 @@ Runs `ement-sync-callback-hook' with SESSION."
   ;; Remove the sync first.  We already have the data from it, and the
   ;; process has exited, so it's safe to run another one.
   (setf (map-elt ement-syncs session) nil)
-  (pcase-let* (((map rooms ('next_batch next-batch) ('account_data (map ('events account-data-events))))
+  (pcase-let* (((map rooms ('next_batch next-batch)
+                     ('account_data (map ('events account-data-events)))
+                     ('presence (map ('events presence-events))))
                 data)
                ((map ('join joined-rooms) ('invite invited-rooms) ('leave left-rooms)) rooms)
                (num-events (+
@@ -608,6 +621,10 @@ Runs `ement-sync-callback-hook' with SESSION."
       (mapc (apply-partially #'ement--push-invite-room-events session) invited-rooms)
       ;; Joined rooms.
       (mapc (apply-partially #'ement--push-joined-room-events session) joined-rooms))
+    ;; Process presence events.
+    (when presence-events
+      (cl-loop for event across presence-events
+               do (ement--process-presence-event event)))
     ;; TODO: Process "left" rooms (remove room structs, etc).
     ;; NOTE: We update the next-batch token before updating any room buffers.  This means
     ;; that any errors in updating room buffers (like for unexpected event formats that
@@ -820,6 +837,40 @@ Adds sender to `ement-users' when necessary."
 (defun ement--put-event (event _room session)
   "Put EVENT on SESSION's events table."
   (puthash (ement-event-id event) event (ement-session-events session)))
+
+(defun ement--process-presence-event (event)
+  "Process a presence EVENT, updating the user's presence status."
+  (pcase-let* (((map ('sender sender-id)
+                     ('content (map ('presence presence-status))))
+                event))
+    (when (and sender-id presence-status)
+      (when-let* ((user (gethash sender-id ement-users)))
+        (setf (ement-user-presence user)
+              (intern presence-status))))))
+
+(defun ement--process-thread-relation (event room session)
+  "Process thread relation for EVENT in ROOM on SESSION.
+If EVENT is a thread reply (has m.thread rel_type), index it
+in ROOM's thread table and update the root event's metadata."
+  (when-let* ((root-id (ement--event-thread-root-id event)))
+    ;; Ensure per-room thread index exists.
+    (unless (alist-get 'threads (ement-room-local room))
+      (setf (alist-get 'threads (ement-room-local room))
+            (make-hash-table :test #'equal)))
+    (let ((threads (alist-get 'threads (ement-room-local room)))
+          (event-id (ement-event-id event)))
+      ;; Add this event's ID to the thread root's reply list (avoiding duplicates).
+      (let ((reply-ids (gethash root-id threads)))
+        (unless (member event-id reply-ids)
+          (puthash root-id (append reply-ids (list event-id)) threads)))
+      ;; Mark this event as a thread reply in its local alist.
+      (setf (alist-get 'thread-root (ement-event-local event)) root-id)
+      ;; Update root event's metadata if we have it.
+      (when-let* ((root-event (gethash root-id (ement-session-events session))))
+        (setf (alist-get 'thread-reply-count (ement-event-local root-event))
+              (length (gethash root-id threads)))
+        (setf (alist-get 'thread-latest-ts (ement-event-local root-event))
+              (ement-event-origin-server-ts event))))))
 
 ;; FIXME: These functions probably need to compare timestamps to
 ;; ensure that older events that are inserted at the head of the

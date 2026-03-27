@@ -50,7 +50,8 @@
             ;; NOTE: Not exactly according to spec, I guess, but useful for now.
             :documentation "Username part of user's Matrix ID.")
   (avatar-url nil :documentation "MXC URL to user's avatar.")
-  (avatar nil :documentation "One-space string with avatar image in display property."))
+  (avatar nil :documentation "One-space string with avatar image in display property.")
+  (presence nil :documentation "User's presence status: online, offline, or unavailable."))
 
 (cl-defstruct ement-event
   id sender content origin-server-ts type unsigned state-key
