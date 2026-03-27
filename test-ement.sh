@@ -134,6 +134,7 @@ emacs_load_args() {
   (require 'ement-room)
   (require 'ement-room-list)
   (require 'ement-notify)
+  (require 'ement-tabulated-room-list)
   (require 'ement-space)
   (require 'ement-search)
 

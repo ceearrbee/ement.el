@@ -83,11 +83,18 @@
   "Used to report progress while processing sync events.")
 
 (defvar ement-sync-callback-hook
-  '(ement--update-room-buffers ement--auto-sync ement-tabulated-room-list-auto-update
+  '(ement--update-room-buffers ement--auto-sync ement--tabulated-room-list-auto-update-maybe
                                ement-room-list-auto-update)
   "Hook run after `ement--sync-callback'.
 Hooks are called with one argument, the session that was
 synced.")
+
+(defun ement--tabulated-room-list-auto-update-maybe (session)
+  "Call `ement-tabulated-room-list-auto-update' if available.
+Avoids void-function errors when `ement-tabulated-room-list' is
+not loaded."
+  (when (fboundp 'ement-tabulated-room-list-auto-update)
+    (ement-tabulated-room-list-auto-update session)))
 
 (defvar ement-event-hook
   '(ement-notify ement--process-event ement--put-event ement--process-thread-relation)
@@ -314,7 +321,8 @@ Ement: SSO login accepted; session token received.  Connecting to Matrix server.
                                          (when (process-live-p sso-server-process)
                                            (delete-process sso-server-process))))
                   (let ((url (concat (ement-server-uri-prefix (ement-session-server session))
-                                     "/_matrix/client/r0/login/sso/redirect?redirectUrl=http://localhost:"
+                                     "/_matrix/client/" ement-api-default-version
+                                     "/login/sso/redirect?redirectUrl=http://localhost:"
                                      (number-to-string ement-sso-server-port))))
                     (funcall browse-url-secondary-browser-function url)
                     (message "Browsing to single sign-on page <%s>..." url)))

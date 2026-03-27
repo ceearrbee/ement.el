@@ -52,6 +52,14 @@
 
 ;;;; Customization
 
+(defcustom ement-api-default-version "v3"
+  "Default Matrix client API version string.
+Used in API endpoint URLs as /_matrix/client/VERSION/ENDPOINT.
+Older servers may require \"r0\"; modern servers use \"v3\"."
+  :type '(choice (const :tag "v3 (modern servers)" "v3")
+                 (const :tag "r0 (legacy servers)" "r0")
+                 (string :tag "Custom"))
+  :group 'ement)
 
 ;;;; Commands
 
@@ -70,7 +78,7 @@
                              ;; should be.  Sometimes the matrix.org homeserver
                              ;; can get slow and respond a minute or two later.
                              (connect-timeout 10) (timeout 60)
-                             (version "r0"))
+                             (version ement-api-default-version))
   "Make API request on SESSION to ENDPOINT.
 The request automatically uses SESSION's server, URI prefix, and
 access token.
