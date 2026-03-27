@@ -288,6 +288,11 @@ In that case, sender names are aligned to the margin edge.")
 (defvar-local ement-room--typing-users nil
   "List of display names of users currently typing in this room.")
 
+(defvar-local ement-room--batch-processing-p nil
+  "Non-nil during batch event processing.
+When set, `ement-room--invalidate-thread-root' is a no-op to
+avoid O(n^2) EWOC scans during initial buffer creation.")
+
 (defvar ement-room-matrix.to-url-regexp
   (rx "http" (optional "s") "://"
       "matrix.to" "/#/"
@@ -1418,6 +1423,12 @@ spec) without requiring all events to use the same margin width."
   (ignore session)
   (ement-room--format-reactions event room))
 
+(defun ement-room--reply-button-action (button)
+  "Jump to the event that BUTTON's message replies to."
+  (when-let* ((event-id (button-get button 'ement-reply-event-id))
+              (event (gethash event-id (ement-session-events ement-session))))
+    (ement-room-goto-event event)))
+
 (ement-room-define-event-formatter ?y
   "Reply indicator.  Shows who this message is replying to."
   (pcase-let* (((cl-struct ement-event
@@ -1440,13 +1451,18 @@ spec) without requiring all events to use the same margin width."
                            (replace-regexp-in-string
                             "\n" " "
                             (or (alist-get 'body (ement-event-content replied-event)) ""))
-                           50 nil nil t))))
+                           40 nil nil t))))
           (propertize (concat "↩ " sender-name
                               (when preview (concat ": " preview))
-                              "\n")
+                              " │ ")
                       'face 'ement-room-quote
-                      'help-echo (when replied-event
-                                   (format "In reply to %s" sender-name))))
+                      'button '(t)
+                      'category 'default-button
+                      'action #'ement-room--reply-button-action
+                      'follow-link t
+                      'mouse-face 'highlight
+                      'help-echo (format "In reply to %s (click to jump)" sender-name)
+                      'ement-reply-event-id reply-event-id))
       ;; Not a reply, or is a thread fallback.
       "")))
 
@@ -1463,6 +1479,13 @@ spec) without requiring all events to use the same margin width."
                             'help-echo "Offline"))
       (_ ""))))
 
+(defun ement-room--thread-button-action (_button)
+  "View the thread for the event at point."
+  (when-let* ((node (ewoc-locate ement-ewoc))
+              (data (ewoc-data node))
+              ((ement-event-p data)))
+    (ement-room-view-thread data)))
+
 (ement-room-define-event-formatter ?T
   "Thread indicator."
   (ignore session)
@@ -1474,12 +1497,22 @@ spec) without requiring all events to use the same margin width."
                (count (plist-get summary :count)))
           (propertize (format " [%d %s]" count (if (= count 1) "reply" "replies"))
                       'face 'ement-room-thread-indicator
-                      'help-echo "Thread: press T to view")))
+                      'button '(t)
+                      'category 'default-button
+                      'action #'ement-room--thread-button-action
+                      'follow-link t
+                      'mouse-face 'highlight
+                      'help-echo "View thread (click or press T)")))
        ;; Thread reply shown in main timeline.
        ((alist-get 'thread-root (ement-event-local event))
         (propertize " [thread]"
                     'face 'ement-room-thread-indicator
-                    'help-echo "Part of a thread: press T to view"))
+                    'button '(t)
+                    'category 'default-button
+                    'action #'ement-room--thread-button-action
+                    'follow-link t
+                    'mouse-face 'highlight
+                    'help-echo "View thread (click or press T)"))
        (t ""))
     ""))
 
@@ -3365,11 +3398,12 @@ buffer."
   ;; FIXME: Calling `ement-room--insert-ts-headers' is convenient, but it
   ;; may also be called in functions that call this function, which may
   ;; result in it being called multiple times for a single set of events.
-  (cl-loop for event being the elements of events ;; EVENTS may be a list or array.
-           for handler = (alist-get (ement-event-type event) ement-room-event-fns nil nil #'equal)
-           when handler
-           do (funcall handler event)
-           do (ement-progress-update))
+  (let ((ement-room--batch-processing-p t))
+    (cl-loop for event being the elements of events ;; EVENTS may be a list or array.
+             for handler = (alist-get (ement-event-type event) ement-room-event-fns nil nil #'equal)
+             when handler
+             do (funcall handler event)
+             do (ement-progress-update)))
   (ement-room--insert-ts-headers))
 
 (defun ement-room--process-event (event)
@@ -3576,7 +3610,8 @@ function to `ement-room-event-fns', which see."
 (ement-room-defevent "m.room.message"
   (pcase-let* (((cl-struct ement-event content unsigned) event)
                ((map ('m.relates_to (map ('rel_type rel-type) ('event_id replaces-event-id)))) content)
-               ((map ('m.relations (map ('m.replace (map ('event_id replaced-by-id)))))) unsigned))
+               ((map ('m.relations (map ('m.replace (map ('event_id replaced-by-id)))))) unsigned)
+               (thread-root-id (ement--event-thread-root-id event)))
     (if (and ement-room-replace-edited-messages
              replaces-event-id (equal "m.replace" rel-type))
         ;; Event replaces existing event: find and replace it in buffer if possible, otherwise insert it.
@@ -3587,20 +3622,15 @@ function to `ement-room-event-fns', which see."
       ;; New event.
       (if replaced-by-id
           (ement-debug "Event replaced: not inserting." replaced-by-id)
-        ;; Check for thread relation.
-        (let ((thread-root-id (and (equal "m.thread" rel-type) replaces-event-id)))
-          ;; Note: for m.thread events, the `event_id' in `m.relates_to' is the thread root.
-          ;; We re-extract it here since the destructuring above already captured it.
-          (setq thread-root-id (ement--event-thread-root-id event))
-          (if (and ement-room-hide-thread-replies thread-root-id)
-              ;; Thread reply and hiding is enabled: don't insert, but invalidate root.
-              (ement-room--invalidate-thread-root thread-root-id)
-            ;; Insert the event normally.
-            (ement-room--insert-event event)
-            ;; If this is a thread reply, also invalidate the root's EWOC node
-            ;; so its thread indicator updates.
-            (when thread-root-id
-              (ement-room--invalidate-thread-root thread-root-id))))))))
+        (if (and ement-room-hide-thread-replies thread-root-id)
+            ;; Thread reply and hiding is enabled: don't insert, but invalidate root.
+            (ement-room--invalidate-thread-root thread-root-id)
+          ;; Insert the event normally.
+          (ement-room--insert-event event)
+          ;; If this is a thread reply, also invalidate the root's EWOC node
+          ;; so its thread indicator updates.
+          (when thread-root-id
+            (ement-room--invalidate-thread-root thread-root-id)))))))
 
 (ement-room-defevent "m.room.tombstone"
   (pcase-let* (((cl-struct ement-event content) event)
@@ -3933,12 +3963,15 @@ PRED is called with node's data.  Moves to next node by MOVE-FN."
 (defun ement-room--invalidate-thread-root (thread-root-id)
   "Invalidate EWOC node for thread root THREAD-ROOT-ID.
 This causes the thread root's display to be refreshed, updating
-its thread indicator."
-  (when-let ((node (ement-room--ewoc-last-matching ement-ewoc
-                     (lambda (data)
-                       (and (ement-event-p data)
-                            (equal thread-root-id (ement-event-id data)))))))
-    (ewoc-invalidate ement-ewoc node)))
+its thread indicator.  No-op during batch event processing
+\(`ement-room--batch-processing-p')."
+  (unless ement-room--batch-processing-p
+    (let ((inhibit-redisplay t))
+      (when-let ((node (ement-room--ewoc-last-matching ement-ewoc
+                         (lambda (data)
+                           (and (ement-event-p data)
+                                (equal thread-root-id (ement-event-id data)))))))
+        (ewoc-invalidate ement-ewoc node)))))
 
 (defun ement-room--ewoc-last-matching (ewoc predicate)
   "Return the last node in EWOC matching PREDICATE.
